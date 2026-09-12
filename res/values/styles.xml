@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- AssistActivity's own theme, defined explicitly rather than
+         relying on the platform's bundled Theme.Translucent.NoTitleBar:
+         confirmed live 2026-09-12 that constant didn't actually produce a
+         see-through overlay on this OS build (AssistActivity opened as
+         what looked like a normal opaque app screen, with the dictate
+         menu then drawn on top of that, rather than a transparent
+         overlay directly atop whatever app was already open). Setting
+         windowIsTranslucent/windowBackground explicitly in our own style
+         is more reliable than depending on however a bundled platform
+         style happens to be defined on any given OS version.
+
+         Parent is a Material theme, not the older Theme.Black.NoTitleBar
+         this used at first: that choice was only ever about fixing
+         translucency (above), but it also meant every default-styled
+         widget (the transcription ProgressBar, notably) rendered with
+         pre-Material chrome instead of the thin animated bar Material
+         gives for free. Asked for explicitly 2026-09-12 ("progress bar
+         looks really ugly, make it look more modern"). -->
+    <style name="TranslucentOverlay" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

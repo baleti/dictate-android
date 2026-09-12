@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Lets Dictate insert transcribed text into whichever field is focused, and copies it to the clipboard as a fallback.</string>
+</resources>

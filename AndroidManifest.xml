@@ -1,0 +1,85 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.local.dictate">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <application android:label="Dictate" android:allowBackup="false" android:usesCleartextTraffic="true" android:icon="@mipmap/ic_launcher">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="Dictate">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Long-press-power trigger: registers Dictate as a selectable
+             Digital Assistant app (Settings, then Apps, then Default
+             apps, then Digital assistant app), asked for explicitly
+             2026-09-12 as the no-persistent-footprint gesture
+             alternative to the Quick Settings tile below. Translucent
+             theme so it overlays the app you were in rather than
+             replacing it outright.
+
+             taskAffinity="" plus singleInstance: without these, this
+             activity shares the app's default task with MainActivity,
+             so if that task already existed (MainActivity opened once
+             for setup, still resident), invoking the gesture resumed
+             THAT task first, showing MainActivity's own screen dimmed
+             behind the overlay instead of whatever app was actually in
+             the foreground - confirmed live 2026-09-12. An empty
+             taskAffinity plus singleInstance guarantees this activity
+             always gets its own separate task, never merging with
+             MainActivity's. -->
+        <activity
+            android:name=".AssistActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:launchMode="singleInstance"
+            android:theme="@style/TranslucentOverlay">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- Quick Settings tile: the trigger. Tap it (from the pulled-
+             down shade) anywhere in the OS to start/stop a dictation. -->
+        <service
+            android:name=".DictateTileService"
+            android:label="Dictate"
+            android:icon="@drawable/ic_mic"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Accessibility service: the injector. Reads the focused node
+             of whatever app is in front and inserts transcribed text into
+             it at the cursor. Must be enabled manually in
+             Settings, then Accessibility: no way around that, same as
+             any accessibility service on any Android device. -->
+        <service
+            android:name=".DictateAccessibilityService"
+            android:label="Dictate text injection"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+</manifest>
