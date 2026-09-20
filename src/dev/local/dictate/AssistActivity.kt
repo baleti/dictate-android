@@ -18,7 +18,6 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 
@@ -43,13 +42,17 @@ import android.widget.Toast
  * android:theme="@android:style/Theme.Translucent.NoTitleBar" in the
  * manifest).
  *
- * Injection timing matters here: DictateAccessibilityService.insertText()
- * acts on whichever window is currently focused, which while THIS
- * activity is on screen is this activity itself, not the app you were
- * using. finish() is called BEFORE inserting, with a short delay after
- * to let window focus actually return to the previous app first --
- * calling insertText() synchronously right after finish() would still
- * often see this activity's own (already-gone) window as focused.
+ * Dictate's own recording UI stays modal (this overlay, tap to stop) --
+ * but transcription and insertion happen in DictateTranscribeService
+ * afterward, not here, so this overlay closes the instant recording
+ * stops rather than sitting through the whole transcription wait (see
+ * stopAndTranscribe()'s own doc). The field being dictated into is
+ * captured (capturedTarget, see its own doc) as early as onCreate() --
+ * this overlay's own window takes real input focus the moment it's
+ * shown (confirmed live 2026-09-20: capturing any later, even at
+ * "stop", consistently came back empty), so onCreate() is the earliest,
+ * narrowest window available to still catch the previous app's field
+ * before that handoff happens.
  */
 class AssistActivity : Activity() {
     private val audioRecorder = AudioRecorder()
@@ -57,8 +60,22 @@ class AssistActivity : Activity() {
     private lateinit var card: LinearLayout
     private var stopped = false
 
+    // Captured in onCreate(), NOT at record-stop time -- confirmed live
+    // 2026-09-20 that captureTarget() always came back empty when called
+    // at stop-tap time instead. Root cause: this overlay's own window
+    // takes real input focus the instant it's shown (translucency and
+    // FLAG_NOT_TOUCH_MODAL only affect touch/visuals, not which single
+    // window the system considers focused), so whatever field you were
+    // typing in stops reporting itself as accessibility-focused the
+    // moment this Activity appears -- well before "Dictate" is even
+    // tapped, let alone "stop". Capturing here instead, as early in this
+    // Activity's own lifecycle as possible, is still a race against that
+    // same focus handoff, but a much narrower one.
+    private var capturedTarget: android.view.accessibility.AccessibilityNodeInfo? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        capturedTarget = DictateAccessibilityService.instance?.captureTarget()
         window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
 
         val dp = { v: Int -> Theme.dp(this, v) }
@@ -254,135 +271,40 @@ class AssistActivity : Activity() {
         audioRecorder.start()
     }
 
-    // Real per-segment progress from the server (server.py's
-    // /stt/stream, WhisperEngine.transcribe_streaming), not a client-side
-    // time estimate -- asked for explicitly 2026-09-12 ("can we make
-    // server report progress to make it more reliable"). Whisper decodes
-    // and yields segments incrementally rather than all at once, so each
-    // one's own end-of-segment timestamp over the clip's total duration
-    // is an honest percentage, not a guess.
+    // Recording itself stays modal (this overlay, tap to stop) -- but
+    // everything past that point (the actual network transcription call,
+    // then insertion) hands off to DictateTranscribeService and this
+    // overlay closes immediately, rather than staying up showing a
+    // progress bar through the whole wait. Asked for explicitly
+    // 2026-09-20: "I want the recording to be modal, but after tapping
+    // to stop recording, the transcription should be in the background"
+    // -- replacing an earlier version of this screen that stayed open
+    // showing live synthesis progress (real per-segment percentage from
+    // the server, falling back to an elapsed-time indeterminate state)
+    // through the whole transcription. That live-progress plumbing
+    // (SttClient.transcribeStreaming, the server's /stt/stream) is still
+    // there for anything that wants it later; this flow just no longer
+    // needs it, since there's no screen left to show it on.
     //
-    // Benchmarked server-side the same day: a short dictated clip almost
-    // always decodes as ONE segment (Whisper's per-call cost is ~fixed
-    // regardless of clip length under ~30s), so that real percentage
-    // just sits at 0 for the whole wait, then jumps to 100 -- asked
-    // again ("is there nothing server can report before?"). While
-    // progress is still 0 the bar goes indeterminate and the stage text
-    // shows elapsed processing time instead (honest, not a guessed
-    // fraction); once a real segment lands it switches back to a
-    // determinate percentage.
-    private var progressBar: ProgressBar? = null
-    private var stageView: TextView? = null
-
+    // Uses capturedTarget (grabbed in onCreate(), see its own doc) rather
+    // than capturing fresh here -- confirmed live 2026-09-20 that by the
+    // time "stop" is tapped, this overlay has long since taken window
+    // focus for itself, so a capture attempt this late always came back
+    // empty. Handing the (hopefully non-null) node to the service now,
+    // instead of letting it look up "whatever's focused" once
+    // transcription finishes, is what's supposed to make it safe to
+    // switch apps, or start another dictation, the instant this
+    // returns -- DictateTranscribeService still falls back to a fresh
+    // lookup at completion time if this is null, which is why dictation
+    // has kept working even while this capture-at-open path gets sorted
+    // out.
     private fun stopAndTranscribe(statusView: TextView) {
         if (stopped) return
         stopped = true
         val pcm = audioRecorder.stop()
-
-        val dp = { v: Int -> Theme.dp(this, v) }
-        card.removeAllViews()
-        card.setOnClickListener(null)
-        card.setPadding(dp(28), dp(24), dp(28), dp(24))
-        card.addView(TextView(this).apply {
-            text = "Transcribing…"
-            textSize = 16f
-            setTextColor(Theme.onBackground)
-        })
-        // Tinted to the app's own palette rather than the system accent
-        // color -- the Material parent theme (see styles.xml) already
-        // gets this a modern thin animated bar for free, this just makes
-        // it match everything else drawn in this card.
-        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            progress = 0
-            isIndeterminate = false
-            progressTintList = android.content.res.ColorStateList.valueOf(Theme.primary)
-            indeterminateTintList = android.content.res.ColorStateList.valueOf(Theme.primary)
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Theme.primary and 0x33FFFFFF.toInt())
-        }
-        val pbParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(4))
-        pbParams.topMargin = dp(14)
-        card.addView(pb, pbParams)
-        progressBar = pb
-        // Starts as "Uploading audio…" -- there's real latency before
-        // the server's first segment/progress message can possibly
-        // arrive (network round-trip, then decoding enough of the clip
-        // to finish even one segment), and that gap shouldn't silently
-        // look like nothing is happening.
-        val stage = TextView(this).apply {
-            text = "Uploading audio…"
-            textSize = 11f
-            setTextColor(Theme.muted)
-            setPadding(0, dp(4), 0, 0)
-        }
-        card.addView(stage)
-        stageView = stage
-
-        Thread {
-            SttClient.transcribeStreaming(
-                context = this,
-                pcm16 = pcm,
-                onProgress = { progress, textSoFar, elapsedSeconds ->
-                    mainHandler.post {
-                        if (progress <= 0f && textSoFar.isBlank()) {
-                            progressBar?.isIndeterminate = true
-                            stageView?.text = "Transcribing… (${"%.1f".format(elapsedSeconds)}s)"
-                        } else {
-                            progressBar?.isIndeterminate = false
-                            progressBar?.progress = (progress * 100).toInt()
-                            stageView?.text = if (textSoFar.isBlank()) "Transcribing…" else "Transcribing… “$textSoFar”"
-                        }
-                    }
-                },
-                onDone = { text ->
-                    mainHandler.post { finishWithResult(text) }
-                },
-                onError = { message ->
-                    mainHandler.post {
-                        Toast.makeText(applicationContext, "Transcription failed: $message", Toast.LENGTH_SHORT).show()
-                        finish()
-                    }
-                },
-            )
-        }.apply { isDaemon = true; name = "AssistTranscribe"; start() }
-    }
-
-    private fun finishWithResult(text: String) {
-        progressBar?.isIndeterminate = false
-        progressBar?.progress = 100
-        if (text.isBlank()) {
-            Toast.makeText(applicationContext, "Heard nothing", Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Dictated text", text))
+        DictateTranscribeService.enqueue(this, pcm, capturedTarget)
+        Toast.makeText(this, "Transcribing in background…", Toast.LENGTH_SHORT).show()
         finish()
-        // See this class's own doc -- insertText() needs the PREVIOUS
-        // app's window to actually be focused again first, which doesn't
-        // happen synchronously with finish(). A single fixed delay
-        // still missed in practice (confirmed live 2026-09-12), so this
-        // retries a few times instead of gambling on one guess being
-        // long enough -- cheap and harmless once it succeeds (later
-        // attempts just never fire, removeCallbacks isn't even needed
-        // since each attempt bails out immediately if a previous one
-        // already won).
-        var attempt = 0
-        lateinit var tryInsert: () -> Unit
-        tryInsert = {
-            val injected = DictateAccessibilityService.instance?.insertText(text) ?: false
-            attempt++
-            if (injected || attempt >= 5) {
-                Toast.makeText(
-                    applicationContext,
-                    if (injected) "Inserted (and copied)" else "Copied to clipboard - paste it in",
-                    Toast.LENGTH_SHORT,
-                ).show()
-            } else {
-                mainHandler.postDelayed(tryInsert, 250)
-            }
-        }
-        mainHandler.postDelayed(tryInsert, 300)
     }
 
     override fun onBackPressed() {
