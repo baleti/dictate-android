@@ -29,13 +29,16 @@ object Settings {
         prefs(context).edit().putInt("port", port).apply()
     }
 
-    // Default switched from medium to small 2026-09-20 ("is there
-    // anything we can do to speed up the transcription") - CPU whisper
-    // has a real per-call floor that's roughly independent of clip
-    // length, and small is meaningfully faster at some accuracy cost.
-    // ai1's tts-stt-server now keeps both loaded, so this is just this
-    // app's own default preference, not a hard requirement.
-    fun getSttModel(context: Context): String = prefs(context).getString("stt_model", "whisper-small-cpu") ?: "whisper-small-cpu"
+    // Switched medium -> small -> whisper-medium-gpu, all 2026-09-20.
+    // small (CPU) was faster than medium (CPU) but a real accuracy
+    // regression ("Could you" transcribed as "Kuchu"). Then found ai1
+    // actually has a second, otherwise-idle GPU the CPU-only assumption
+    // never accounted for - medium on that GPU transcribes in ~0.5-0.8s
+    // (confirmed live end to end through the real server, not just an
+    // isolated benchmark), full medium accuracy, faster than CPU small
+    // ever was. ai1's tts-stt-server keeps all three loaded, so this is
+    // just this app's own default preference, not a hard requirement.
+    fun getSttModel(context: Context): String = prefs(context).getString("stt_model", "whisper-medium-gpu") ?: "whisper-medium-gpu"
 
     fun setSttModel(context: Context, model: String) {
         prefs(context).edit().putString("stt_model", model).apply()
