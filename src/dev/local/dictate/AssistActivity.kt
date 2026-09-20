@@ -42,11 +42,10 @@ import android.widget.Toast
  * android:theme="@android:style/Theme.Translucent.NoTitleBar" in the
  * manifest).
  *
- * Dictate's own recording UI stays modal (this overlay, tap to stop) --
- * but transcription and insertion happen in DictateTranscribeService
- * afterward, not here, so this overlay closes the instant recording
- * stops rather than sitting through the whole transcription wait (see
- * stopAndTranscribe()'s own doc). The field being dictated into is
+ * Dictate's own recording UI, and now transcription too, stay modal --
+ * this overlay stays open (showing a "Transcribing…" status) through the
+ * whole stop -> transcribe -> insert sequence, closing only once that's
+ * done (see stopAndTranscribe()'s own doc). The field being dictated into is
  * captured (capturedTarget, see its own doc) as early as onCreate() --
  * this overlay's own window takes real input focus the moment it's
  * shown (confirmed live 2026-09-20: capturing any later, even at
@@ -76,7 +75,23 @@ class AssistActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         capturedTarget = DictateAccessibilityService.instance?.captureTarget()
-        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
+        // FLAG_NOT_FOCUSABLE (which implies FLAG_NOT_TOUCH_MODAL, kept
+        // explicit anyway) keeps real window/accessibility focus on
+        // whatever app is underneath for as long as this overlay is
+        // shown -- without it, THIS window takes that focus the instant
+        // it's shown (see capturedTarget's own doc), which used to only
+        // matter for an instant back when transcription ran in the
+        // background and this overlay closed right after "stop" was
+        // tapped. Now that it stays open through the whole transcribe
+        // (modal again, see stopAndTranscribe()'s own doc), that same
+        // stolen focus lasted the whole wait -- confirmed live
+        // 2026-09-20: captured node went stale (refresh=false) AND the
+        // fresh-lookup fallback came up empty too by the time
+        // transcription finished, because the real app never had focus
+        // back to look up. Touches on the card itself (tap to stop, menu
+        // rows) still work fine unfocused -- they're plain touch/click
+        // listeners, not anything that needs key/IME focus.
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
 
         val dp = { v: Int -> Theme.dp(this, v) }
         val root = FrameLayout(this).apply {
@@ -260,50 +275,83 @@ class AssistActivity : Activity() {
             setTextColor(Theme.onBackground)
         }
         card.addView(statusView)
-        card.addView(TextView(this).apply {
+        val elapsedView = TextView(this).apply {
             text = "Copied to clipboard, and inserted where you were typing if possible"
             textSize = 12f
             setTextColor(Theme.muted)
             setPadding(0, dp(6), 0, 0)
-        })
-        card.setOnClickListener { stopAndTranscribe(statusView) }
+        }
+        card.addView(elapsedView)
+        card.setOnClickListener { stopAndTranscribe(statusView, elapsedView) }
 
         audioRecorder.start()
     }
 
-    // Recording itself stays modal (this overlay, tap to stop) -- but
-    // everything past that point (the actual network transcription call,
-    // then insertion) hands off to DictateTranscribeService and this
-    // overlay closes immediately, rather than staying up showing a
-    // progress bar through the whole wait. Asked for explicitly
-    // 2026-09-20: "I want the recording to be modal, but after tapping
-    // to stop recording, the transcription should be in the background"
-    // -- replacing an earlier version of this screen that stayed open
-    // showing live synthesis progress (real per-segment percentage from
-    // the server, falling back to an elapsed-time indeterminate state)
-    // through the whole transcription. That live-progress plumbing
-    // (SttClient.transcribeStreaming, the server's /stt/stream) is still
-    // there for anything that wants it later; this flow just no longer
-    // needs it, since there's no screen left to show it on.
+    // Went modal -> background -> modal again, same day (2026-09-20).
+    // Backgrounding transcription made sense while CPU whisper-medium
+    // took several real seconds; once GPU whisper-medium (see Settings'
+    // own doc) dropped that to ~0.5-0.8s end to end, background handoff
+    // was solving a problem that had basically stopped existing, at the
+    // cost of a slower-feeling flow (a toast instead of watching it
+    // finish) -- undone: "get it back to being modal... just show the
+    // progress of transcribing... I imagine this would be practically
+    // immediate now... this would allow us to just press stop, have very
+    // short popup and have it send immediately." DictateTranscribeService
+    // (the background-queue version of this) is gone; its one useful
+    // trick -- falling back to a fresh focused-node lookup if
+    // capturedTarget is null -- is kept below.
     //
     // Uses capturedTarget (grabbed in onCreate(), see its own doc) rather
     // than capturing fresh here -- confirmed live 2026-09-20 that by the
     // time "stop" is tapped, this overlay has long since taken window
     // focus for itself, so a capture attempt this late always came back
-    // empty. Handing the (hopefully non-null) node to the service now,
-    // instead of letting it look up "whatever's focused" once
-    // transcription finishes, is what's supposed to make it safe to
-    // switch apps, or start another dictation, the instant this
-    // returns -- DictateTranscribeService still falls back to a fresh
-    // lookup at completion time if this is null, which is why dictation
-    // has kept working even while this capture-at-open path gets sorted
-    // out.
-    private fun stopAndTranscribe(statusView: TextView) {
+    // empty.
+    private fun stopAndTranscribe(statusView: TextView, elapsedView: TextView) {
         if (stopped) return
         stopped = true
         val pcm = audioRecorder.stop()
-        DictateTranscribeService.enqueue(this, pcm, capturedTarget)
-        Toast.makeText(this, "Transcribing in background…", Toast.LENGTH_SHORT).show()
+        statusView.text = "Transcribing…"
+        val startNanos = System.nanoTime()
+        val tick = object : Runnable {
+            override fun run() {
+                val elapsedSec = (System.nanoTime() - startNanos) / 1_000_000_000.0
+                elapsedView.text = "%.1fs".format(elapsedSec)
+                mainHandler.postDelayed(this, 100)
+            }
+        }
+        mainHandler.post(tick)
+        Thread {
+            try {
+                val text = SttClient.transcribe(this, pcm)
+                mainHandler.post {
+                    mainHandler.removeCallbacks(tick)
+                    finishWithResult(text)
+                }
+            } catch (e: Exception) {
+                mainHandler.post {
+                    mainHandler.removeCallbacks(tick)
+                    Toast.makeText(this, "Transcription failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    finish()
+                }
+            }
+        }.apply { isDaemon = true; name = "DictateTranscribe"; start() }
+    }
+
+    private fun finishWithResult(text: String) {
+        if (text.isBlank()) {
+            Toast.makeText(this, "Heard nothing", Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Dictated text", text))
+        val service = DictateAccessibilityService.instance
+        val injected = when {
+            service == null -> false
+            capturedTarget != null -> service.insertInto(capturedTarget!!, text)
+            else -> service.insertText(text)
+        }
+        Toast.makeText(this, if (injected) "Inserted (and copied)" else "Copied to clipboard - paste it in", Toast.LENGTH_SHORT).show()
         finish()
     }
 

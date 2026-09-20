@@ -67,11 +67,38 @@ class DictateAccessibilityService : AccessibilityService() {
      * screen it belonged to is gone), falls back to a fresh focus lookup
      * rather than silently failing outright. */
     fun insertInto(node: AccessibilityNodeInfo, text: String): Boolean {
+        val expectedPkg = node.packageName
         val refreshOk = node.refresh()
         Log.d("DictateInsert", "insertInto: refresh=$refreshOk")
         val focused = if (refreshOk) node else {
+            // A fresh lookup here means the captured node itself is gone
+            // (its window was torn down), NOT just "went to the
+            // background" -- refresh() keeps succeeding for a node whose
+            // window is merely backgrounded, so this only fires once
+            // there's genuinely nothing left to fall back to except
+            // "whatever's focused right now". Confirmed live 2026-09-20:
+            // switched apps mid-transcription (claude-agents -> WhatsApp)
+            // and this blind fallback happily inserted the dictated text
+            // into WhatsApp's compose box instead -- wrong app, real risk
+            // of sending something private to the wrong place. Refusing
+            // to fall back across a package boundary (falling back to
+            // clipboard-only instead, same as any other failed insert)
+            // is the fix -- the ONE exception is claude-agents-android
+            // itself with no fresh match (findFocusedEditable's own
+            // loosened last-resort case for it), which is still allowed
+            // through since staying inside the expected app is the whole
+            // point of the check.
+            val activePkg = rootInActiveWindow?.packageName
+            if (expectedPkg != null && activePkg != null && activePkg != expectedPkg) {
+                Log.d("DictateInsert", "insertInto: active app changed ($expectedPkg -> $activePkg), refusing cross-app insert")
+                return false
+            }
             val fresh = findFocusedEditable()
             Log.d("DictateInsert", "insertInto: refresh failed, fresh lookup found=${fresh != null}")
+            if (fresh != null && fresh.packageName != expectedPkg) {
+                Log.d("DictateInsert", "insertInto: fresh match is a different app ($expectedPkg -> ${fresh.packageName}), refusing")
+                return false
+            }
             fresh ?: return false
         }
         if (!focused.isEditable) {

@@ -40,17 +40,6 @@ class MainActivity : Activity() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
         }
-        // Needed for DictateTranscribeService's own ongoing notification
-        // to actually show on API 33+ -- the foreground service itself
-        // still runs without this, only its notification silently fails
-        // to display, so requesting it up front here (rather than the
-        // first time a background transcription happens) avoids a
-        // surprise permission prompt interrupting that flow.
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
-        }
 
         val pad = Theme.dp(this, 20)
         val root = LinearLayout(this).apply {
