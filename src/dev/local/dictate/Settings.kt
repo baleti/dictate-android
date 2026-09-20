@@ -29,7 +29,13 @@ object Settings {
         prefs(context).edit().putInt("port", port).apply()
     }
 
-    fun getSttModel(context: Context): String = prefs(context).getString("stt_model", "whisper-medium-cpu") ?: "whisper-medium-cpu"
+    // Default switched from medium to small 2026-09-20 ("is there
+    // anything we can do to speed up the transcription") - CPU whisper
+    // has a real per-call floor that's roughly independent of clip
+    // length, and small is meaningfully faster at some accuracy cost.
+    // ai1's tts-stt-server now keeps both loaded, so this is just this
+    // app's own default preference, not a hard requirement.
+    fun getSttModel(context: Context): String = prefs(context).getString("stt_model", "whisper-small-cpu") ?: "whisper-small-cpu"
 
     fun setSttModel(context: Context, model: String) {
         prefs(context).edit().putString("stt_model", model).apply()
