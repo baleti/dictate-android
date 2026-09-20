@@ -164,12 +164,12 @@ class DictateAccessibilityService : AccessibilityService() {
      * returned instead of the real target. */
     private fun findFocusedEditable(): AccessibilityNodeInfo? {
         rootInActiveWindow?.let { root ->
-            (root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findEditableFocused(root))?.let { return it }
+            focusInputEditable(root)?.let { return it }
         }
         for (window in windows) {
             val root = window.root ?: continue
             if (root.packageName == packageName) continue
-            (root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findEditableFocused(root))?.let { return it }
+            focusInputEditable(root)?.let { return it }
         }
         // Loosened fallback for claude-agents-android specifically --
         // asked for explicitly 2026-09-20 ("the input field doesn't have
@@ -199,6 +199,16 @@ class DictateAccessibilityService : AccessibilityService() {
         }
         return null
     }
+
+    /** FOCUS_INPUT's own result isn't always editable -- confirmed live
+     * 2026-09-20 (captureTarget: found=true editable=false, right in
+     * claude-agents-android's own window) that the system can report
+     * some other view as having "input focus" at the exact moment this
+     * runs, not necessarily the real text field. Discards a non-editable
+     * match and falls through to the manual tree-walk instead of
+     * returning something insertInto() would just reject anyway. */
+    private fun focusInputEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? =
+        root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable } ?: findEditableFocused(root)
 
     /** Manual fallback for when FOCUS_INPUT finds nothing: walks the
      * whole node tree for any editable node the view system still marks
