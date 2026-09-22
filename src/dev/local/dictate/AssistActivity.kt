@@ -75,23 +75,7 @@ class AssistActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         capturedTarget = DictateAccessibilityService.instance?.captureTarget()
-        // FLAG_NOT_FOCUSABLE (which implies FLAG_NOT_TOUCH_MODAL, kept
-        // explicit anyway) keeps real window/accessibility focus on
-        // whatever app is underneath for as long as this overlay is
-        // shown -- without it, THIS window takes that focus the instant
-        // it's shown (see capturedTarget's own doc), which used to only
-        // matter for an instant back when transcription ran in the
-        // background and this overlay closed right after "stop" was
-        // tapped. Now that it stays open through the whole transcribe
-        // (modal again, see stopAndTranscribe()'s own doc), that same
-        // stolen focus lasted the whole wait -- confirmed live
-        // 2026-09-20: captured node went stale (refresh=false) AND the
-        // fresh-lookup fallback came up empty too by the time
-        // transcription finished, because the real app never had focus
-        // back to look up. Touches on the card itself (tap to stop, menu
-        // rows) still work fine unfocused -- they're plain touch/click
-        // listeners, not anything that needs key/IME focus.
-        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL)
 
         val dp = { v: Int -> Theme.dp(this, v) }
         val root = FrameLayout(this).apply {
@@ -255,6 +239,28 @@ class AssistActivity : Activity() {
     // ------------------------------------------------------------ dictate
 
     private fun startDictating() {
+        // FLAG_NOT_FOCUSABLE (which implies FLAG_NOT_TOUCH_MODAL, already
+        // set unconditionally in onCreate() for every action) keeps real
+        // window/accessibility focus on whatever app is underneath for as
+        // long as THIS overlay is shown -- without it, this window takes
+        // that focus the instant it's shown (see capturedTarget's own
+        // doc), which matters here because dictation now stays open
+        // through the whole record+transcribe window (modal, see
+        // stopAndTranscribe()'s own doc) -- see that flag's original doc
+        // (now here, moved) for the live-confirmed staleness/cross-app
+        // bug it fixes.
+        //
+        // Scoped to JUST this action, not set unconditionally in
+        // onCreate() for every action -- confirmed live 2026-09-21 that
+        // setting it that broadly silently broke stripClipboardMarkdown():
+        // Android only allows clipboard reads from the currently FOCUSED
+        // window, and a permanently-unfocusable overlay can never satisfy
+        // that, so "Strip markdown" started reporting "clipboard is
+        // empty" even with real content on it. Dictation is the only
+        // action that holds this overlay open long enough for the
+        // original bug to matter; the others (including clipboard
+        // access) need real focusability.
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE)
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Open the Dictate app once to grant microphone access", Toast.LENGTH_LONG).show()
             finish()
@@ -345,14 +351,44 @@ class AssistActivity : Activity() {
         }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Dictated text", text))
-        val service = DictateAccessibilityService.instance
-        val injected = when {
-            service == null -> false
-            capturedTarget != null -> service.insertInto(capturedTarget!!, text)
-            else -> service.insertText(text)
-        }
-        Toast.makeText(this, if (injected) "Inserted (and copied)" else "Copied to clipboard - paste it in", Toast.LENGTH_SHORT).show()
+        // finish() FIRST, THEN insert -- confirmed live 2026-09-22 this
+        // order genuinely matters and isn't just cosmetic. This overlay is
+        // singleInstance/taskAffinity="" (AndroidManifest), so it always
+        // runs in its OWN task on top of the target app's task, not just a
+        // dialog within it. While that's true -- i.e. for as long as THIS
+        // overlay stays open -- AccessibilityService.getWindows() simply
+        // stops reporting the target app's window at all (not a brief
+        // race: retried 5x over 1.3s with zero variance, every attempt
+        // identically "not found", reproduced with claude-agents-android's
+        // read-aloud both on and off). Once this activity's own task is no
+        // longer topmost, the previous task resumes and its window becomes
+        // visible to getWindows() again -- exactly the same constraint the
+        // pre-modal version of this class already worked around (see git
+        // history: insertText() needed the previous app's window to
+        // actually be focused again first, which doesn't happen
+        // synchronously with finish() either, hence the retry loop below).
+        // capturedTarget's own node.refresh() can still short-circuit this
+        // entirely when it happens to still be valid, so it's tried first;
+        // the fresh-lookup fallback inside insertInto()/insertText() is
+        // what actually needs the previous task back in front.
         finish()
+        var attempt = 0
+        lateinit var tryInsert: () -> Unit
+        tryInsert = {
+            val service = DictateAccessibilityService.instance
+            val injected = when {
+                service == null -> false
+                capturedTarget != null -> service.insertInto(capturedTarget!!, text)
+                else -> service.insertText(text)
+            }
+            attempt++
+            if (injected || attempt >= 5) {
+                Toast.makeText(applicationContext, if (injected) "Inserted (and copied)" else "Copied to clipboard - paste it in", Toast.LENGTH_SHORT).show()
+            } else {
+                mainHandler.postDelayed(tryInsert, 250)
+            }
+        }
+        mainHandler.postDelayed(tryInsert, 300)
     }
 
     override fun onBackPressed() {

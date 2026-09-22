@@ -88,8 +88,26 @@ class DictateAccessibilityService : AccessibilityService() {
             // loosened last-resort case for it), which is still allowed
             // through since staying inside the expected app is the whole
             // point of the check.
+            //
+            // activePkg == our OWN package (dev.local.dictate) must NOT
+            // count as "switched apps" -- confirmed live 2026-09-22:
+            // rootInActiveWindow still reports THIS app's own AssistActivity
+            // overlay (still showing "Transcribing...") at the moment this
+            // runs, every single time, not just when the user actually
+            // navigates away. That made this check fire on ordinary inserts
+            // too, not just real cross-app switches -- specifically
+            // whenever refresh() failed for an unrelated reason (reported
+            // live: refresh() reliably fails while claude-agents-android's
+            // own read-aloud is playing, since its word-highlight ticker
+            // and player-bar scrubber keep mutating the window and
+            // invalidate the captured node handle -- confirmed via logcat:
+            // "insertInto: refresh=false" immediately followed by "active
+            // app changed (dev.local.claudeagents -> dev.local.dictate)").
+            // Excluding our own package here lets that case fall through to
+            // the fresh findFocusedEditable() lookup below instead of
+            // refusing outright.
             val activePkg = rootInActiveWindow?.packageName
-            if (expectedPkg != null && activePkg != null && activePkg != expectedPkg) {
+            if (expectedPkg != null && activePkg != null && activePkg != expectedPkg && activePkg != packageName) {
                 Log.d("DictateInsert", "insertInto: active app changed ($expectedPkg -> $activePkg), refusing cross-app insert")
                 return false
             }
